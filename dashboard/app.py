@@ -5,121 +5,134 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+import serial
 from scipy.fft import fft
 
-# Add project root
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# CONFIGURE YOUR COM PORT HERE
+COM_PORT = "COM5"      # <-- CHANGE THIS
+BAUD_RATE = 9600       # <-- Confirm with device manual
 
 st.set_page_config(layout="wide")
-st.title("🌌 Real-Time Cosmic Ray Monitoring System")
+st.title("🌌 Real-Time Cosmic Ray Monitoring (USB Connected)")
 
-# ---------- Initialize Data ----------
+# ---------- Initialize Serial ----------
+
+@st.cache_resource
+def init_serial():
+    return serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
+
+try:
+    ser = init_serial()
+except Exception as e:
+    st.error(f"Could not open serial port: {e}")
+    st.stop()
+
+# ---------- Initialize Session Data ----------
 
 if "data" not in st.session_state:
-    timestamps = pd.date_range(
-        start=pd.Timestamp.now(),
-        periods=200,
-        freq="s"   # FIXED (lowercase s)
+    st.session_state.data = pd.DataFrame(
+        columns=["timestamp", "counts"]
     )
 
-    counts = 1500 + np.random.normal(0, 20, 200)
-    pressure = 1010 + np.random.normal(0, 2, 200)
+# ---------- Read From USB ----------
 
-    st.session_state.data = pd.DataFrame({
-        "timestamp": timestamps,
-        "counts": counts,
-        "pressure": pressure
-    })
+try:
+    line = ser.readline().decode("utf-8").strip()
 
-# ---------- Simulate Live Data ----------
+    if line:
+        # If format is "COUNT:1523", modify parsing here
+        count_value = float(line)
 
-new_row = pd.DataFrame({
-    "timestamp": [pd.Timestamp.now()],
-    "counts": [1500 + np.random.normal(0, 20)],
-    "pressure": [1010 + np.random.normal(0, 2)]
-})
+        new_row = pd.DataFrame({
+            "timestamp": [pd.Timestamp.now()],
+            "counts": [count_value]
+        })
 
-st.session_state.data = pd.concat(
-    [st.session_state.data, new_row]
-).tail(300)
+        st.session_state.data = pd.concat(
+            [st.session_state.data, new_row]
+        ).tail(500)
+
+except Exception:
+    pass  # Ignore corrupted serial reads
 
 df = st.session_state.data.copy()
 
 # ---------- Processing ----------
 
-df["rolling_mean"] = df["counts"].rolling(20).mean()
-df["rolling_std"] = df["counts"].rolling(20).std()
+if not df.empty:
 
-mean = df["counts"].mean()
-std = df["counts"].std()
-df["z_score"] = (df["counts"] - mean) / std
-df["anomaly"] = np.abs(df["z_score"]) > 3
+    df["rolling_mean"] = df["counts"].rolling(20).mean()
+    df["rolling_std"] = df["counts"].rolling(20).std()
 
-df["pressure_corrected"] = df["counts"] * (
-    df["pressure"].mean() / df["pressure"]
-)
+    mean = df["counts"].mean()
+    std = df["counts"].std()
+    df["z_score"] = (df["counts"] - mean) / std
+    df["anomaly"] = np.abs(df["z_score"]) > 3
 
-fft_values = np.abs(fft(df["counts"].fillna(0)))
+    fft_values = np.abs(fft(df["counts"].fillna(0)))
 
-# ---------- Layout ----------
+    col1, col2 = st.columns(2)
 
-col1, col2 = st.columns(2)
+    # 1 Raw
+    fig1 = go.Figure()
+    fig1.add_trace(go.Scatter(x=df["timestamp"], y=df["counts"], mode="lines"))
+    fig1.update_layout(title="1️⃣ Raw Counts")
+    col1.plotly_chart(fig1, width="stretch")
 
-# 1 Raw Counts
-fig1 = go.Figure()
-fig1.add_trace(go.Scatter(x=df["timestamp"], y=df["counts"], mode="lines"))
-fig1.update_layout(title="1️⃣ Raw Counts")
-col1.plotly_chart(fig1, width="stretch")
+    # 2 Rolling Mean
+    fig2 = go.Figure()
+    fig2.add_trace(go.Scatter(x=df["timestamp"], y=df["rolling_mean"], mode="lines"))
+    fig2.update_layout(title="2️⃣ Rolling Mean")
+    col2.plotly_chart(fig2, width="stretch")
 
-# 2 Rolling Mean
-fig2 = go.Figure()
-fig2.add_trace(go.Scatter(x=df["timestamp"], y=df["rolling_mean"], mode="lines"))
-fig2.update_layout(title="2️⃣ Rolling Mean")
-col2.plotly_chart(fig2, width="stretch")
+    # 3 Z-score
+    fig3 = go.Figure()
+    fig3.add_trace(go.Scatter(x=df["timestamp"], y=df["z_score"], mode="lines"))
+    fig3.update_layout(title="3️⃣ Z-Score")
+    col1.plotly_chart(fig3, width="stretch")
 
-# 3 Pressure Corrected
-fig3 = go.Figure()
-fig3.add_trace(go.Scatter(x=df["timestamp"], y=df["pressure_corrected"], mode="lines"))
-fig3.update_layout(title="3️⃣ Pressure Corrected Counts")
-col1.plotly_chart(fig3, width="stretch")
+    # 4 Anomalies
+    fig4 = go.Figure()
+    fig4.add_trace(go.Scatter(x=df["timestamp"], y=df["counts"], mode="lines"))
+    anomalies = df[df["anomaly"]]
+    fig4.add_trace(go.Scatter(
+        x=anomalies["timestamp"],
+        y=anomalies["counts"],
+        mode="markers"
+    ))
+    fig4.update_layout(title="4️⃣ Anomaly Detection")
+    col2.plotly_chart(fig4, width="stretch")
 
-# 4 Z-Score
-fig4 = go.Figure()
-fig4.add_trace(go.Scatter(x=df["timestamp"], y=df["z_score"], mode="lines"))
-fig4.update_layout(title="4️⃣ Z-Score")
-col2.plotly_chart(fig4, width="stretch")
+    # 5 Histogram
+    fig5 = go.Figure()
+    fig5.add_trace(go.Histogram(x=df["counts"]))
+    fig5.update_layout(title="5️⃣ Histogram")
+    col1.plotly_chart(fig5, width="stretch")
 
-# 5 Anomalies
-fig5 = go.Figure()
-fig5.add_trace(go.Scatter(x=df["timestamp"], y=df["counts"], mode="lines"))
-anomalies = df[df["anomaly"]]
-fig5.add_trace(go.Scatter(
-    x=anomalies["timestamp"],
-    y=anomalies["counts"],
-    mode="markers"
-))
-fig5.update_layout(title="5️⃣ Anomaly Detection")
-col1.plotly_chart(fig5, width="stretch")
+    # 6 FFT
+    fig6 = go.Figure()
+    fig6.add_trace(go.Scatter(y=fft_values))
+    fig6.update_layout(title="6️⃣ FFT Spectrum")
+    col2.plotly_chart(fig6, width="stretch")
 
-# 6 Histogram
-fig6 = go.Figure()
-fig6.add_trace(go.Histogram(x=df["counts"]))
-fig6.update_layout(title="6️⃣ Histogram of Counts")
-col2.plotly_chart(fig6, width="stretch")
+    # 7 Rolling Std
+    fig7 = go.Figure()
+    fig7.add_trace(go.Scatter(x=df["timestamp"], y=df["rolling_std"], mode="lines"))
+    fig7.update_layout(title="7️⃣ Rolling Std Dev")
+    col1.plotly_chart(fig7, width="stretch")
 
-# 7 FFT Spectrum
-fig7 = go.Figure()
-fig7.add_trace(go.Scatter(y=fft_values))
-fig7.update_layout(title="7️⃣ FFT Spectrum")
-col1.plotly_chart(fig7, width="stretch")
+    # 8 Count Rate (per minute estimate)
+    if len(df) > 60:
+        rate = df["counts"].tail(60).mean()
+    else:
+        rate = df["counts"].mean()
 
-# 8 Rolling Std Dev
-fig8 = go.Figure()
-fig8.add_trace(go.Scatter(x=df["timestamp"], y=df["rolling_std"], mode="lines"))
-fig8.update_layout(title="8️⃣ Rolling Standard Deviation")
-col2.plotly_chart(fig8, width="stretch")
+    st.metric("8️⃣ Estimated Count Rate (Last 60 samples)", f"{rate:.2f}")
 
-# ---------- Controlled Auto Refresh ----------
+else:
+    st.info("Waiting for detector data...")
 
-time.sleep(2)
+# ---------- Refresh ----------
+
+time.sleep(1)
 st.rerun()
